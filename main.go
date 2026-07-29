@@ -36,6 +36,9 @@ const (
 
 var categoryOrder = []string{catGoGreen, catDeli, catComfort}
 
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 var (
 	weekdaysDA = [...]string{"Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"}
 	weekdaysEN = [...]string{"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
@@ -173,7 +176,13 @@ func main() {
 	location := flag.Int("location", 1, "location/banner id")
 	lang := flag.String("lang", "da", "menu language: da or en")
 	week := flag.Int("week", 0, "ISO week number to show (0 = all weeks returned)")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("foodplace %s\n", version)
+		return
+	}
 
 	if *lang != "da" && *lang != "en" {
 		fmt.Fprintln(os.Stderr, "Error: -lang must be 'da' or 'en'")
