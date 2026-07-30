@@ -116,6 +116,7 @@ foodplace upgrade    # self-update to the latest release
   -lang da|en    menu language (default: da)
   -location N    location / banner id (default: 1)
   -week N        show only this ISO week number (default: 0 = all weeks returned)
+  -allergy       also print each dish's allergens
   -version       print version and exit
 ```
 
@@ -124,6 +125,7 @@ Examples:
 ```sh
 foodplace                 # this/next week's menu in Danish
 foodplace -lang en        # in English
+foodplace -allergy        # include allergens for each dish
 foodplace -week 31        # only ISO week 31
 foodplace -location 2     # a different location
 ```

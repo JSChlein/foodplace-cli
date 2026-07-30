@@ -380,6 +380,7 @@ func main() {
 	location := flag.Int("location", 1, "location/banner id")
 	lang := flag.String("lang", "da", "menu language: da or en")
 	week := flag.Int("week", 0, "ISO week number to show (0 = all weeks returned)")
+	allergy := flag.Bool("allergy", false, "also print each dish's allergens")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -470,7 +471,7 @@ func main() {
 					continue
 				}
 				fmt.Printf("  %-12s %s\n", cat+":", dsh.name)
-				if len(dsh.allergens) > 0 {
+				if *allergy && len(dsh.allergens) > 0 {
 					fmt.Printf("  %-12s %s: %s\n", "", allergensLabel, strings.Join(dsh.allergens, ", "))
 				}
 			}
