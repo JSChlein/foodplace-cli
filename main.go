@@ -9,22 +9,34 @@
 // Usage:
 //
 //	go run . [-location N] [-lang da|en] [-week N]
+//	go run . upgrade            # replace the binary with the latest release
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 )
 
 const baseURL = "https://salling.thefoodplace.dk/banner/weekmenu/%d"
+
+// binName is the executable/asset name; repo is the GitHub repository that
+// hosts the releases the `upgrade` command pulls from.
+const (
+	binName = "foodplace"
+	repo    = "JSChlein/foodplace-cli"
+)
 
 // The categories we care about, in display order. A dish is matched to a
 // category either by its own station name or by its parent station name.
@@ -211,7 +223,160 @@ func weekdayName(t time.Time, lang string) string {
 	return weekdaysDA[idx]
 }
 
+// latestReleaseTag asks the GitHub API for the tag of the newest release.
+func latestReleaseTag() (string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", binName)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned %s", resp.Status)
+	}
+
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", fmt.Errorf("parsing release info: %w", err)
+	}
+	if rel.TagName == "" {
+		return "", fmt.Errorf("could not determine latest release tag")
+	}
+	return rel.TagName, nil
+}
+
+// downloadReleaseBinary fetches the release archive for the given tag and the
+// running OS/arch, and returns the raw bytes of the foodplace binary inside it.
+func downloadReleaseBinary(tag string) ([]byte, error) {
+	if runtime.GOOS == "windows" {
+		return nil, fmt.Errorf(
+			"self-upgrade isn't supported on Windows — download the .zip from https://github.com/%s/releases", repo)
+	}
+	asset := fmt.Sprintf("%s_%s_%s_%s", binName, tag, runtime.GOOS, runtime.GOARCH)
+	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s.tar.gz", repo, tag, asset)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", binName)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("downloading %s: %s", url, resp.Status)
+	}
+
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading gzip stream: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading archive: %w", err)
+		}
+		// Archives contain "<asset>/foodplace"; match on the base name.
+		if filepath.Base(hdr.Name) == binName && hdr.Typeflag == tar.TypeReg {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("extracting binary: %w", err)
+			}
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("binary %q not found in release archive", binName)
+}
+
+// runUpgrade replaces the running binary with the latest release, in place.
+func runUpgrade() error {
+	fmt.Println("Checking for the latest release ...")
+	tag, err := latestReleaseTag()
+	if err != nil {
+		return err
+	}
+	if tag == version {
+		fmt.Printf("Already up to date (%s).\n", version)
+		return nil
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locating current binary: %w", err)
+	}
+	// Resolve symlinks so we replace the real file, not a link to it.
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+
+	fmt.Printf("Updating %s -> %s ...\n", version, tag)
+	data, err := downloadReleaseBinary(tag)
+	if err != nil {
+		return err
+	}
+
+	// Write to a temp file next to the target so the final rename is atomic
+	// (os.Rename can't cross filesystems).
+	dir := filepath.Dir(exe)
+	tmp, err := os.CreateTemp(dir, ".foodplace-upgrade-*")
+	if err != nil {
+		return fmt.Errorf("cannot write to %s (try re-running with sudo): %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing new binary: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o755); err != nil {
+		return fmt.Errorf("setting permissions: %w", err)
+	}
+	if err := os.Rename(tmpName, exe); err != nil {
+		return fmt.Errorf("replacing %s (try re-running with sudo): %w", exe, err)
+	}
+
+	fmt.Printf("Upgraded to %s.\n", tag)
+	return nil
+}
+
 func main() {
+	// Subcommands are handled before flag parsing so they don't collide with
+	// the menu flags.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "upgrade", "update":
+			if err := runUpgrade(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	location := flag.Int("location", 1, "location/banner id")
 	lang := flag.String("lang", "da", "menu language: da or en")
 	week := flag.Int("week", 0, "ISO week number to show (0 = all weeks returned)")

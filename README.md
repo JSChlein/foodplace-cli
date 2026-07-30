@@ -111,6 +111,7 @@ go install github.com/JSChlein/foodplace-cli@latest
 
 ```
 foodplace [flags]
+foodplace upgrade    # self-update to the latest release
 
   -lang da|en    menu language (default: da)
   -location N    location / banner id (default: 1)
@@ -126,6 +127,26 @@ foodplace -lang en        # in English
 foodplace -week 31        # only ISO week 31
 foodplace -location 2     # a different location
 ```
+
+## Updating
+
+The tool can update itself in place — no need to re-run the install script:
+
+```sh
+foodplace upgrade         # or: foodplace update
+```
+
+This checks the latest [GitHub release](https://github.com/JSChlein/foodplace-cli/releases),
+downloads the binary for your OS/architecture, and atomically replaces the
+running executable. If the tool lives somewhere that needs elevated permissions
+(e.g. `/usr/local/bin`), run it with `sudo`:
+
+```sh
+sudo foodplace upgrade
+```
+
+> **Windows:** self-upgrade isn't supported — download the latest `.zip` from
+> the Releases page and replace `foodplace.exe` manually.
 
 ## Building from source
 
