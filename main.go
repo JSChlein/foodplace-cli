@@ -62,6 +62,15 @@ type station struct {
 	Sequence    int    `json:"sequence"`
 }
 
+// allergen is one entry of a recipe's allergens_list. The site nests the
+// details under an "Allergens_id" object.
+type allergen struct {
+	AllergensID struct {
+		Name           string `json:"name"`            // Danish
+		TranslatedName string `json:"translated_name"` // English
+	} `json:"Allergens_id"`
+}
+
 type menuEntry struct {
 	Date        string `json:"date"`
 	StationName struct {
@@ -69,8 +78,9 @@ type menuEntry struct {
 		ParentID *station `json:"parent_id"`
 	} `json:"station_name"`
 	RecipeID struct {
-		MenuInfo  string `json:"menu_info"`   // Danish
-		MenuInfo1 string `json:"menu_info_1"` // English
+		MenuInfo      string     `json:"menu_info"`      // Danish
+		MenuInfo1     string     `json:"menu_info_1"`    // English
+		AllergensList []allergen `json:"allergens_list"` // may be empty/absent
 	} `json:"recipe_id"`
 }
 
@@ -90,9 +100,34 @@ func (e menuEntry) category() string {
 	return ""
 }
 
+// allergens returns the de-duplicated allergen names for an entry in the given
+// language, falling back to the other language when one is missing. Returns nil
+// when the recipe carries no allergens.
+func (e menuEntry) allergens(lang string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, a := range e.RecipeID.AllergensList {
+		name := strings.TrimSpace(a.AllergensID.Name)
+		if lang == "en" {
+			if t := strings.TrimSpace(a.AllergensID.TranslatedName); t != "" {
+				name = t
+			}
+		} else if name == "" {
+			name = strings.TrimSpace(a.AllergensID.TranslatedName)
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
 type dish struct {
-	sequence int
-	name     string
+	sequence  int
+	name      string
+	allergens []string
 }
 
 func fetchHTML(location int) (string, error) {
@@ -157,7 +192,11 @@ func parseMenu(entries []menuEntry, lang string) map[string]map[string]dish {
 		}
 		// keep only the first entry per category (lowest sequence)
 		if cur, ok := byDay[e.Date][cat]; !ok || e.StationName.Sequence < cur.sequence {
-			byDay[e.Date][cat] = dish{sequence: e.StationName.Sequence, name: name}
+			byDay[e.Date][cat] = dish{
+				sequence:  e.StationName.Sequence,
+				name:      name,
+				allergens: e.allergens(lang),
+			}
 		}
 	}
 	return byDay
@@ -229,22 +268,45 @@ func main() {
 		daysByWeek[wk] = append(daysByWeek[wk], d)
 	}
 
+	// Only show days that are today or in the future. ISO date strings
+	// (YYYY-MM-DD) compare lexicographically, so a string compare is enough.
+	today := time.Now().Format("2006-01-02")
+	allergensLabel := "Allergener"
+	if *lang == "en" {
+		allergensLabel = "Allergens"
+	}
+
 	for _, wk := range weekOrder {
 		if *week != 0 && wk != *week {
 			continue
 		}
+
+		days := make([]string, 0, len(daysByWeek[wk]))
+		for _, d := range daysByWeek[wk] {
+			if d >= today {
+				days = append(days, d)
+			}
+		}
+		if len(days) == 0 {
+			continue // whole week is in the past
+		}
+
 		if *lang == "da" {
 			fmt.Printf("\n=== Uge %d ===\n", wk)
 		} else {
 			fmt.Printf("\n=== Week %d ===\n", wk)
 		}
-		for _, d := range daysByWeek[wk] {
+		for _, d := range days {
 			fmt.Printf("\n%s (%s)\n", weekdayName(dateTime[d], *lang), d)
 			for _, cat := range categoryOrder {
-				if dsh, ok := byDay[d][cat]; ok {
-					fmt.Printf("  %-12s %s\n", cat+":", dsh.name)
-				} else {
+				dsh, ok := byDay[d][cat]
+				if !ok {
 					fmt.Printf("  %-12s -\n", cat+":")
+					continue
+				}
+				fmt.Printf("  %-12s %s\n", cat+":", dsh.name)
+				if len(dsh.allergens) > 0 {
+					fmt.Printf("  %-12s %s: %s\n", "", allergensLabel, strings.Join(dsh.allergens, ", "))
 				}
 			}
 		}

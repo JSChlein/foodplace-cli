@@ -1,3 +1,6 @@
 /dist/
 /foodplace
 /foodplace.exe
+
+# Slack bot lives in its own project and is not tracked here
+/foodplace-bot/
