@@ -8,13 +8,14 @@
 //
 // Usage:
 //
-//	go run . [-location N] [-lang da|en] [-week N]
+//	go run . [-location N] [-lang da|en] [-week N] [-explain]
 //	go run . upgrade            # replace the binary with the latest release
 package main
 
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -381,6 +382,7 @@ func main() {
 	lang := flag.String("lang", "da", "menu language: da or en")
 	week := flag.Int("week", 0, "ISO week number to show (0 = all weeks returned)")
 	allergy := flag.Bool("allergy", false, "also print each dish's allergens")
+	explain := flag.Bool("explain", false, "also print an AI explanation of each dish")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -394,76 +396,122 @@ func main() {
 		os.Exit(2)
 	}
 
-	html, err := fetchHTML(*location)
+	byDay, err := loadMenu(*location, *lang)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+
+	weeks := selectWeeks(byDay, *week)
+
+	// Explanations are fetched up front so every dish on screen goes out in a
+	// single request. A failure here shouldn't cost us the menu itself.
+	var explanations map[string]string
+	if *explain {
+		ctx, cancel := context.WithTimeout(context.Background(), explainTimeout)
+		defer cancel()
+
+		explanations, err = explainDishes(ctx, dishNames(weeks, byDay), *lang)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not explain dishes: %v\n", err)
+		}
+	}
+
+	printWeeks(weeks, byDay, *lang, *allergy, explanations)
+}
+
+// loadMenu fetches the menu page and returns its dishes grouped by ISO date.
+func loadMenu(location int, lang string) (map[string]map[string]dish, error) {
+	html, err := fetchHTML(location)
+	if err != nil {
+		return nil, err
 	}
 	entries, err := extractEntries(html)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return nil, err
 	}
-
-	byDay := parseMenu(entries, *lang)
+	byDay := parseMenu(entries, lang)
 	if len(byDay) == 0 {
-		fmt.Fprintln(os.Stderr, "No menu items found.")
-		os.Exit(1)
+		return nil, fmt.Errorf("no menu items found")
 	}
+	return byDay, nil
+}
 
-	// Sort the dates, then group them by ISO week.
+// weekMenu is the set of days of one ISO week that we're going to print.
+type weekMenu struct {
+	number int
+	days   []string
+	times  map[string]time.Time
+}
+
+// selectWeeks groups the menu's dates into ISO weeks, dropping days in the past
+// and — when week is non-zero — every week but that one.
+func selectWeeks(byDay map[string]map[string]dish, week int) []weekMenu {
 	dates := make([]string, 0, len(byDay))
 	for d := range byDay {
 		dates = append(dates, d)
 	}
 	sort.Strings(dates)
 
-	weekOrder := []int{}
-	daysByWeek := map[int][]string{}
-	dateTime := map[string]time.Time{}
-	for _, d := range dates {
-		t, err := time.Parse("2006-01-02", d)
-		if err != nil {
-			continue
-		}
-		dateTime[d] = t
-		_, wk := t.ISOWeek()
-		if _, seen := daysByWeek[wk]; !seen {
-			weekOrder = append(weekOrder, wk)
-		}
-		daysByWeek[wk] = append(daysByWeek[wk], d)
-	}
-
 	// Only show days that are today or in the future. ISO date strings
 	// (YYYY-MM-DD) compare lexicographically, so a string compare is enough.
 	today := time.Now().Format("2006-01-02")
-	allergensLabel := "Allergener"
-	if *lang == "en" {
-		allergensLabel = "Allergens"
-	}
 
-	for _, wk := range weekOrder {
-		if *week != 0 && wk != *week {
+	var weeks []weekMenu
+	byNumber := map[int]int{} // ISO week -> index into weeks
+	for _, d := range dates {
+		t, err := time.Parse("2006-01-02", d)
+		if err != nil || d < today {
 			continue
 		}
+		_, wk := t.ISOWeek()
+		if week != 0 && wk != week {
+			continue
+		}
+		i, seen := byNumber[wk]
+		if !seen {
+			i = len(weeks)
+			byNumber[wk] = i
+			weeks = append(weeks, weekMenu{number: wk, times: map[string]time.Time{}})
+		}
+		weeks[i].days = append(weeks[i].days, d)
+		weeks[i].times[d] = t
+	}
+	return weeks
+}
 
-		days := make([]string, 0, len(daysByWeek[wk]))
-		for _, d := range daysByWeek[wk] {
-			if d >= today {
-				days = append(days, d)
+// dishNames returns every distinct dish that printWeeks will show, in the order
+// it appears on screen.
+func dishNames(weeks []weekMenu, byDay map[string]map[string]dish) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, wk := range weeks {
+		for _, d := range wk.days {
+			for _, cat := range categoryOrder {
+				dsh, ok := byDay[d][cat]
+				if !ok || seen[dsh.name] {
+					continue
+				}
+				seen[dsh.name] = true
+				names = append(names, dsh.name)
 			}
 		}
-		if len(days) == 0 {
-			continue // whole week is in the past
-		}
+	}
+	return names
+}
 
-		if *lang == "da" {
-			fmt.Printf("\n=== Uge %d ===\n", wk)
-		} else {
-			fmt.Printf("\n=== Week %d ===\n", wk)
-		}
-		for _, d := range days {
-			fmt.Printf("\n%s (%s)\n", weekdayName(dateTime[d], *lang), d)
+func printWeeks(weeks []weekMenu, byDay map[string]map[string]dish, lang string, allergy bool, explanations map[string]string) {
+	allergensLabel := "Allergener"
+	weekLabel := "Uge"
+	if lang == "en" {
+		allergensLabel = "Allergens"
+		weekLabel = "Week"
+	}
+
+	for _, wk := range weeks {
+		fmt.Printf("\n=== %s %d ===\n", weekLabel, wk.number)
+		for _, d := range wk.days {
+			fmt.Printf("\n%s (%s)\n", weekdayName(wk.times[d], lang), d)
 			for _, cat := range categoryOrder {
 				dsh, ok := byDay[d][cat]
 				if !ok {
@@ -471,11 +519,52 @@ func main() {
 					continue
 				}
 				fmt.Printf("  %-12s %s\n", cat+":", dsh.name)
-				if *allergy && len(dsh.allergens) > 0 {
+				if allergy && len(dsh.allergens) > 0 {
 					fmt.Printf("  %-12s %s: %s\n", "", allergensLabel, strings.Join(dsh.allergens, ", "))
+				}
+				if exp, ok := explanations[dsh.name]; ok {
+					printExplanation(exp)
 				}
 			}
 		}
 	}
 	fmt.Println()
+}
+
+// explanationWidth is where explanation text wraps. The label gutter takes 17
+// columns, so this keeps a line inside an 80-column terminal.
+const explanationWidth = 60
+
+// printExplanation prints an explanation under its dish, wrapped and indented
+// so continuation lines line up with the first one.
+func printExplanation(exp string) {
+	for i, line := range wrapWords(exp, explanationWidth) {
+		marker := "→"
+		if i > 0 {
+			marker = " "
+		}
+		fmt.Printf("  %-12s %s %s\n", "", marker, line)
+	}
+}
+
+// wrapWords greedily breaks s into lines of at most width runes, splitting on
+// whitespace only. A word longer than width gets its own (over-long) line.
+func wrapWords(s string, width int) []string {
+	var lines []string
+	var cur string
+	for _, word := range strings.Fields(s) {
+		switch {
+		case cur == "":
+			cur = word
+		case len([]rune(cur))+1+len([]rune(word)) <= width:
+			cur += " " + word
+		default:
+			lines = append(lines, cur)
+			cur = word
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
 }

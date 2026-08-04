@@ -117,6 +117,7 @@ foodplace upgrade    # self-update to the latest release
   -location N    location / banner id (default: 1)
   -week N        show only this ISO week number (default: 0 = all weeks returned)
   -allergy       also print each dish's allergens
+  -explain       also print an AI explanation of each dish
   -version       print version and exit
 ```
 
@@ -126,9 +127,68 @@ Examples:
 foodplace                 # this/next week's menu in Danish
 foodplace -lang en        # in English
 foodplace -allergy        # include allergens for each dish
+foodplace -explain        # explain what each dish actually is
 foodplace -week 31        # only ISO week 31
 foodplace -location 2     # a different location
 ```
+
+## Explaining the dishes
+
+Menu names are often a bare list of ingredients. `-explain` asks
+[Claude](https://claude.com) what each dish actually is and prints a one-line
+description under it, in the same language as the menu:
+
+```
+$ foodplace -explain
+
+=== Uge 32 ===
+
+Tirsdag (2026-08-04)
+  Go Green:    Vegetarisk korma med blomkål og kikærter
+               → En mild, cremet indisk karryret med kokosmælk og et
+                 krydderimiks af bl.a. gurkemeje, spidskommen og koriander.
+  Deli:        Pålægsfade
+               → Et fad med udskåret pålæg — typisk skinke, salami og ost —
+                 til at bygge sit eget smørrebrød af.
+  ...
+```
+
+### Reaching Claude
+
+There are two ways, and `foodplace` picks whichever is available:
+
+**1. A Claude subscription** (no API key needed). If you have
+[Claude Code](https://claude.com/claude-code) installed and logged in, that's
+all you need — `foodplace` runs it in non-interactive mode:
+
+```sh
+npm install -g @anthropic-ai/claude-code   # if you don't have it
+claude login
+foodplace -explain
+```
+
+This draws on your Claude subscription's usage limits rather than being billed
+per token.
+
+**2. An Anthropic API key**, if you'd rather not install Claude Code. Get one
+from the [Console](https://console.anthropic.com):
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+foodplace -explain
+```
+
+At this volume the API route costs a couple of dollars a year.
+
+### Caching
+
+All the dishes on screen go out in a single request, and the answers are cached
+under your user cache directory (`~/Library/Caches/foodplace` on macOS,
+`~/.cache/foodplace` on Linux). The first run of the week takes 20–30 seconds;
+after that it's instant and free. Delete the cache file to force a refresh.
+
+If neither Claude Code nor an API key is available — or the request fails — the
+menu still prints in full, just without the explanations.
 
 ## Updating
 
@@ -152,7 +212,7 @@ sudo foodplace upgrade
 
 ## Building from source
 
-Only needed if you're developing the tool. Requires [Go](https://go.dev) 1.23+.
+Only needed if you're developing the tool. Requires [Go](https://go.dev) 1.24+.
 
 ```sh
 git clone https://github.com/JSChlein/foodplace-cli.git
