@@ -10,7 +10,7 @@
 //     Claude subscription. Preferred, because it needs no API key.
 //  2. The Anthropic API, for anyone who has a key but not Claude Code.
 //
-// Either way all dishes on screen go out in a single request, and the answers
+// Either way the dishes are explained in concurrent batches, and the answers
 // are cached on disk so re-running the tool during the week costs nothing.
 package main
 
@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -34,6 +35,14 @@ import (
 const (
 	explainCLIModel = "sonnet"
 	explainAPIModel = "claude-opus-5"
+)
+
+// Dishes are explained in concurrent batches. Writing the sentences is what
+// takes the time, so several short lists finish sooner than one long one;
+// the cap keeps us from launching a dozen Claude Code sessions at once.
+const (
+	explainChunkSize   = 6
+	explainMaxParallel = 4
 )
 
 const explainSystemDA = `Du forklarer frokostretter for en kantinemenu.
@@ -92,45 +101,95 @@ func explainDishes(ctx context.Context, dishes []string, lang string) (map[strin
 		return out, nil
 	}
 
+	// Asking Claude takes a while, and until it answers we have nothing to
+	// print. Say so, or the tool looks like it has hung.
+	fmt.Fprintf(os.Stderr, "Explaining %d new dishes (only needed once per menu) ...\n", len(missing))
+
+	// A partial answer is still worth keeping: one failed chunk shouldn't throw
+	// away the ones that succeeded.
 	fresh, err := requestExplanations(ctx, missing, lang)
-	if err != nil {
-		// Whatever came from the cache is still worth printing.
-		return out, err
-	}
 	for name, exp := range fresh {
 		out[name] = exp
 		cache[cacheKey(name, lang)] = exp
 	}
-	saveExplanationCache(cache)
-	return out, nil
+	if len(fresh) > 0 {
+		saveExplanationCache(cache)
+	}
+	return out, err
 }
 
-// requestExplanations sends one request covering every dish, preferring the
-// `claude` CLI so that a Claude subscription is enough to use -explain.
+// requestExplanations explains every dish, splitting the work into chunks that
+// run concurrently. Generating the sentences dominates the wall clock, so
+// asking for a few short lists in parallel beats one long list by a wide
+// margin.
 func requestExplanations(ctx context.Context, dishes []string, lang string) (map[string]string, error) {
 	system := explainSystemDA
 	if lang == "en" {
 		system = explainSystemEN
 	}
+	ask := pickBackend()
 
+	chunks := chunkDishes(dishes, explainChunkSize)
+	results := make([]map[string]string, len(chunks))
+	errs := make([]error, len(chunks))
+
+	sem := make(chan struct{}, explainMaxParallel)
+	var wg sync.WaitGroup
+	for i, chunk := range chunks {
+		wg.Add(1)
+		go func(i int, chunk []string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			results[i], errs[i] = explainChunk(ctx, ask, system, chunk)
+		}(i, chunk)
+	}
+	wg.Wait()
+
+	merged := make(map[string]string, len(dishes))
+	for _, r := range results {
+		for name, exp := range r {
+			merged[name] = exp
+		}
+	}
+	return merged, errors.Join(errs...)
+}
+
+// explainChunk asks for one batch of dishes. Indices in the prompt are local to
+// the chunk, so each batch is self-contained.
+func explainChunk(ctx context.Context, ask explainBackend, system string, dishes []string) (map[string]string, error) {
 	var list strings.Builder
 	for i, name := range dishes {
 		fmt.Fprintf(&list, "%d. %s\n", i, name)
 	}
-
-	var (
-		answer string
-		err    error
-	)
-	if claudeBin, lookErr := exec.LookPath("claude"); lookErr == nil {
-		answer, err = askClaudeCLI(ctx, claudeBin, system, list.String())
-	} else {
-		answer, err = askClaudeAPI(ctx, system, list.String())
-	}
+	answer, err := ask(ctx, system, list.String())
 	if err != nil {
 		return nil, err
 	}
 	return parseExplanations(answer, dishes)
+}
+
+func chunkDishes(dishes []string, size int) [][]string {
+	var chunks [][]string
+	for start := 0; start < len(dishes); start += size {
+		end := min(start+size, len(dishes))
+		chunks = append(chunks, dishes[start:end])
+	}
+	return chunks
+}
+
+// explainBackend turns a system prompt plus a dish list into a raw JSON answer.
+type explainBackend func(ctx context.Context, system, prompt string) (string, error)
+
+// pickBackend resolves how to reach Claude once, rather than per chunk,
+// preferring the `claude` CLI so that a Claude subscription is enough.
+func pickBackend() explainBackend {
+	if bin, err := exec.LookPath("claude"); err == nil {
+		return func(ctx context.Context, system, prompt string) (string, error) {
+			return askClaudeCLI(ctx, bin, system, prompt)
+		}
+	}
+	return askClaudeAPI
 }
 
 // askClaudeCLI shells out to Claude Code's non-interactive mode, which uses
@@ -146,6 +205,7 @@ func askClaudeCLI(ctx context.Context, bin, system, prompt string) (string, erro
 		"--print",
 		"--model", explainCLIModel,
 		"--effort", "low", // one sentence per dish; no need to deliberate
+		"--allowed-tools", "", // pure text task; skip loading the tool harness
 		"--output-format", "text",
 		"--system-prompt", system,
 		"--json-schema", string(schema),

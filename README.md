@@ -182,10 +182,13 @@ At this volume the API route costs a couple of dollars a year.
 
 ### Caching
 
-All the dishes on screen go out in a single request, and the answers are cached
-under your user cache directory (`~/Library/Caches/foodplace` on macOS,
-`~/.cache/foodplace` on Linux). The first run of the week takes 20–30 seconds;
+Dishes are explained in small batches that run concurrently, and the answers are
+cached under your user cache directory (`~/Library/Caches/foodplace` on macOS,
+`~/.cache/foodplace` on Linux). The first run on a new menu takes 10–15 seconds;
 after that it's instant and free. Delete the cache file to force a refresh.
+
+Explanations are cached per language, so `-lang en` explains the dishes again
+using their English names rather than reusing the Danish answers.
 
 If neither Claude Code nor an API key is available — or the request fails — the
 menu still prints in full, just without the explanations.
